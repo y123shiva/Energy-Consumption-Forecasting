@@ -1,0 +1,14 @@
+pandas
+numpy
+xgboost
+scikit-learn
+statsmodels
+mlflow
+fastapi
+uvicorn
+streamlit
+matplotlib
+apache-airflow
+joblib
+aiofiles
+aiocsv
