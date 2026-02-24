@@ -10,10 +10,6 @@ __pycache__/
 dist/
 build/
 
-# Data
-data/*.csv
-data/*.parquet
-
 # Models
 *.pkl
 *.joblib
