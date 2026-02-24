@@ -1,58 +1,85 @@
+# =========================================================
+# ⚡ Energy Forecasting & Monitoring Dashboard
+# Production-ready Streamlit App
+# =========================================================
+
 import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import requests
-from scipy.stats import ks_2samp
+import joblib
 import mlflow
-from io import StringIO
+from pathlib import Path
+from scipy.stats import ks_2samp
 
-# ---------------------------------------------------
-# Config
-# ---------------------------------------------------
-API_URL = "http://localhost:8000/predict/upload_async"
-BASELINE_PATH = "data/energy_data.csv"
 
-mlflow.set_tracking_uri("sqlite:///mlflow.db")
-st.set_page_config(layout="wide")
+# =========================================================
+# Page Config
+# =========================================================
+st.set_page_config(
+    page_title="Energy Forecast Dashboard",
+    page_icon="⚡",
+    layout="wide",
+)
 
-# ---------------------------------------------------
-# Helpers
-# ---------------------------------------------------
+st.title("⚡ Energy Forecasting & Monitoring")
 
+
+# =========================================================
+# Paths (Cloud Safe)
+# =========================================================
+ROOT = Path(__file__).parent.parent
+DATA_PATH = ROOT / "data" / "energy_data.csv"
+MODEL_PATH = ROOT / "xgb_model.pkl"
+
+
+# =========================================================
+# Loaders
+# =========================================================
 @st.cache_data
 def load_baseline():
-    df = pd.read_csv(BASELINE_PATH, parse_dates=["Date"])
+    df = pd.read_csv(DATA_PATH, parse_dates=["Date"])
     df["rolling7"] = df["Energy"].rolling(7).mean()
     return df
 
 
+@st.cache_resource
+def load_model():
+    if MODEL_PATH.exists():
+        return joblib.load(MODEL_PATH)
+    return None
+
+
 @st.cache_data
 def load_runs():
-    runs = mlflow.search_runs()
+    try:
+        mlflow.set_tracking_uri("sqlite:///mlflow.db")
+        runs = mlflow.search_runs()
 
-    if runs.empty:
+        if runs.empty:
+            return pd.DataFrame()
+
+        cols = ["run_id", "metrics.MAE", "metrics.RMSE", "metrics.MAPE"]
+        runs = runs[[c for c in cols if c in runs.columns]]
+
+        runs.rename(
+            columns={
+                "metrics.MAE": "MAE",
+                "metrics.RMSE": "RMSE",
+                "metrics.MAPE": "MAPE",
+            },
+            inplace=True,
+        )
+
+        return runs.sort_values("MAE")
+
+    except Exception:
         return pd.DataFrame()
 
-    cols = ["run_id", "metrics.MAE", "metrics.RMSE", "metrics.MAPE"]
 
-    runs = runs[[c for c in cols if c in runs.columns]]
-
-    runs.rename(
-        columns={
-            "metrics.MAE": "MAE",
-            "metrics.RMSE": "RMSE",
-            "metrics.MAPE": "MAPE",
-        },
-        inplace=True,
-    )
-
-    return runs.sort_values("MAE")
-
-
-# ------------------------
-# Drift Detection (KS-test)
-# ------------------------
+# =========================================================
+# Utils
+# =========================================================
 def feature_drift(base, current):
     results = []
 
@@ -76,119 +103,145 @@ def feature_drift(base, current):
     return pd.DataFrame(results, columns=["feature", "ks_stat", "p_value", "drift"])
 
 
-# ------------------------
-# FastAPI call
-# ------------------------
-def call_api(file):
-    files = {"file": file}
-    r = requests.post(API_URL, files=files)
-
-    if r.status_code != 200:
-        st.error(f"API error: {r.text}")
+def local_predict(file):
+    model = load_model()
+    if model is None:
+        st.error("Model file not found.")
         return None
 
-    return pd.read_csv(StringIO(r.text))
+    df = pd.read_csv(file)
+    df["prediction"] = model.predict(df)
+    return df
 
 
-# ---------------------------------------------------
-# Load baseline + experiments
-# ---------------------------------------------------
+# =========================================================
+# Load Data
+# =========================================================
 baseline_df = load_baseline()
 runs_df = load_runs()
 
-# ---------------------------------------------------
-# UI
-# ---------------------------------------------------
-st.title("⚡ Energy Forecasting & Monitoring Dashboard")
 
+# =========================================================
+# Sidebar
+# =========================================================
+st.sidebar.header("⚙ Controls")
+
+date_range = st.sidebar.date_input(
+    "Date Range",
+    [baseline_df["Date"].min(), baseline_df["Date"].max()],
+)
+
+show_rolling = st.sidebar.checkbox("Show 7-day average", value=True)
+
+
+filtered_df = baseline_df[
+    (baseline_df["Date"] >= pd.to_datetime(date_range[0]))
+    & (baseline_df["Date"] <= pd.to_datetime(date_range[1]))
+]
+
+
+# =========================================================
+# KPI Cards
+# =========================================================
+c1, c2, c3, c4 = st.columns(4)
+
+c1.metric("Total Records", len(filtered_df))
+c2.metric("Avg Energy", round(filtered_df["Energy"].mean(), 2))
+c3.metric("Max Energy", round(filtered_df["Energy"].max(), 2))
+c4.metric("Min Energy", round(filtered_df["Energy"].min(), 2))
+
+
+st.divider()
+
+
+# =========================================================
+# Tabs
+# =========================================================
 tabs = st.tabs(
     [
-        "📈 Data",
-        "🚀 Live Predictions",
-        "📉 Drift Monitoring",
+        "📈 Historical Data",
+        "🚀 Predictions",
+        "📉 Drift",
         "📊 Experiments",
-        "🏆 Best Model",
     ]
 )
 
-# ===================================================
-# TAB 1 — Historical Data
-# ===================================================
-with tabs[0]:
-    st.subheader("Energy Demand")
 
-    fig, ax = plt.subplots(figsize=(12, 5))
-    ax.plot(baseline_df["Date"], baseline_df["Energy"], label="Energy")
-    ax.plot(baseline_df["Date"], baseline_df["rolling7"], label="7d Avg")
+# =========================================================
+# TAB 1 — Historical
+# =========================================================
+with tabs[0]:
+    st.subheader("Energy Demand Trend")
+
+    fig, ax = plt.subplots(figsize=(14, 5))
+
+    ax.plot(filtered_df["Date"], filtered_df["Energy"], label="Energy")
+
+    if show_rolling:
+        ax.plot(filtered_df["Date"], filtered_df["rolling7"], label="7-day Avg")
+
     ax.legend()
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Energy")
 
     st.pyplot(fig)
-    st.dataframe(baseline_df.tail(), width="stretch")
+
+    st.dataframe(filtered_df.tail(), use_container_width=True)
 
 
-# ===================================================
-# TAB 2 — Live Predictions (FastAPI)
-# ===================================================
+# =========================================================
+# TAB 2 — Local Predictions
+# =========================================================
 with tabs[1]:
-    st.subheader("Upload CSV for Live Prediction")
+    st.subheader("Upload CSV for Prediction")
 
-    uploaded = st.file_uploader("Upload inference CSV", type=["csv"])
+    uploaded = st.file_uploader("Inference file", type=["csv"])
 
     if uploaded:
-        with st.spinner("Calling FastAPI..."):
-            preds = call_api(uploaded)
+        with st.spinner("Running model..."):
+            preds = local_predict(uploaded)
 
         if preds is not None:
-            st.success("Predictions received")
+            st.success("Prediction completed")
 
-            st.dataframe(preds.head(), width="stretch")
+            st.dataframe(preds.head(), use_container_width=True)
 
-            if "prediction" in preds.columns:
-                fig, ax = plt.subplots()
-                ax.plot(preds["prediction"])
-                ax.set_title("Forecast Output")
-                st.pyplot(fig)
+            fig, ax = plt.subplots()
+            ax.plot(preds["prediction"])
+            ax.set_title("Forecast Output")
+            st.pyplot(fig)
 
 
-# ===================================================
-# TAB 3 — Drift Monitoring
-# ===================================================
+# =========================================================
+# TAB 3 — Drift
+# =========================================================
 with tabs[2]:
-    st.subheader("Feature-level Drift Detection (KS-test)")
+    st.subheader("Feature Drift Detection (KS Test)")
 
     drift_file = st.file_uploader("Upload current production CSV", type=["csv"], key="drift")
 
     if drift_file:
         current_df = pd.read_csv(drift_file)
-
         drift_df = feature_drift(baseline_df, current_df)
 
-        st.dataframe(drift_df, width="stretch")
-
-        st.download_button(
-            "Download drift scores",
-            drift_df.to_csv(index=False),
-            "drift_scores.csv",
-        )
-
-        st.subheader("Drift Visualization")
+        st.dataframe(drift_df, use_container_width=True)
 
         fig, ax = plt.subplots()
         ax.bar(drift_df["feature"], drift_df["ks_stat"])
-        ax.set_xticklabels(drift_df["feature"], rotation=45, ha="right")
+        ax.set_xticklabels(drift_df["feature"], rotation=45)
         st.pyplot(fig)
 
 
-# ===================================================
-# TAB 4 — MLflow Experiments
-# ===================================================
+# =========================================================
+# TAB 4 — Experiments
+# =========================================================
 with tabs[3]:
-    st.subheader("Model Comparison (MLflow)")
+    st.subheader("MLflow Experiment Tracking")
 
     if runs_df.empty:
-        st.info("Run training first: python train.py")
+        st.info("No MLflow runs found. Train models locally to log experiments.")
     else:
-        st.dataframe(runs_df, width="stretch")
+        st.dataframe(runs_df, use_container_width=True)
 
         c1, c2 = st.columns(2)
 
@@ -199,19 +252,8 @@ with tabs[3]:
             st.bar_chart(runs_df.set_index("run_id")["RMSE"])
 
 
-# ===================================================
-# TAB 5 — Best Model
-# ===================================================
-with tabs[4]:
-    st.subheader("Best Model (Lowest MAE)")
-
-    if not runs_df.empty:
-        best = runs_df.iloc[0]
-
-        c1, c2, c3 = st.columns(3)
-
-        c1.metric("Run ID", best["run_id"])
-        c2.metric("MAE", round(best["MAE"], 2))
-        c3.metric("RMSE", round(best["RMSE"], 2))
-
-        st.success("Automatically selected best model")
+# =========================================================
+# Footer
+# =========================================================
+st.divider()
+st.caption("Built with Streamlit • Energy Forecasting MLOps Dashboard")
